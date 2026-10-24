@@ -16,8 +16,6 @@
 package ops
 
 import (
-	"sort"
-
 	"github.com/Fuaran-Core/fuaran-core-go/decode"
 	"github.com/Fuaran-Core/fuaran-core-go/json"
 	"github.com/Fuaran-Core/fuaran-core-go/tree"
@@ -307,21 +305,105 @@ func firstDuplicate(t, graft *tree.Node) (string, bool) {
 	return "", false
 }
 
-// detach removes the node with id from below n; nil when it is not below n.
-func detach(n *tree.Node, id string) *tree.Node {
-	for i := range n.Children {
-		if n.Children[i].ID == id {
-			removed := n.Children[i]
-			n.Children = append(n.Children[:i], n.Children[i+1:]...)
-			return &removed
+// The tree primitives below are the reference's, clause for clause, over the tree
+// AS IT STANDS — a well-formed tree holds each id once, and on such a tree "every
+// node carrying the id" and "the node with the id" coincide. The reference's
+// apply ASSUMES well-formedness and never states it, so on a tree that repeats an
+// id its answer is still defined, and these are that answer: the reference's
+// updateNode rebuilds EVERY node whose id matches, and tryFind / parentOf resolve
+// to the FIRST in pre-order. The oracle differential compares the two on every
+// tree the fuzzer builds, well-formed or not, so the spine answers as the model
+// does rather than as a first-match walk happens to.
+
+// hasID is the reference's Tree.exists.
+func hasID(t *tree.Node, id string) bool { return t.Find(id) != nil }
+
+// parentOf is the reference's Tree.parentOf: the first pre-order node one of whose
+// children carries id; "" and false when none does.
+func parentOf(t *tree.Node, id string) (string, bool) {
+	for i := range t.Children {
+		if t.Children[i].ID == id {
+			return t.ID, true
 		}
 	}
-	for i := range n.Children {
-		if removed := detach(&n.Children[i], id); removed != nil {
-			return removed
+	for i := range t.Children {
+		if p, ok := parentOf(&t.Children[i], id); ok {
+			return p, true
 		}
 	}
-	return nil
+	return "", false
+}
+
+// everyNode applies f to every node of t whose id is id, children first.
+func everyNode(t *tree.Node, id string, f func(*tree.Node)) {
+	for i := range t.Children {
+		everyNode(&t.Children[i], id, f)
+	}
+	if t.ID == id {
+		f(t)
+	}
+}
+
+// ins appends a copy of n to every node carrying id p (the reference's ins).
+func ins(t *tree.Node, p string, n *tree.Node) {
+	everyNode(t, p, func(node *tree.Node) { node.Children = append(node.Children, n.Clone()) })
+}
+
+// remAt drops every child carrying x from every node carrying pid (the reference's
+// rem_at over drop_kid).
+func remAt(t *tree.Node, pid, x string) {
+	everyNode(t, pid, func(node *tree.Node) {
+		kept := node.Children[:0]
+		for _, c := range node.Children {
+			if c.ID != x {
+				kept = append(kept, c)
+			}
+		}
+		node.Children = kept
+	})
+}
+
+// reorderAt arranges the children of every node carrying p in order: for each id of
+// order, the LAST child carrying it (the reference's Map.ofList keeps the last entry
+// for a repeated key), an id no child carries dropped (the reference's reorder_at
+// over arrange).
+func reorderAt(t *tree.Node, p string, order []string) {
+	everyNode(t, p, func(node *tree.Node) {
+		arranged := make([]tree.Node, 0, len(order))
+		for _, id := range order {
+			for i := len(node.Children) - 1; i >= 0; i-- {
+				if node.Children[i].ID == id {
+					arranged = append(arranged, node.Children[i])
+					break
+				}
+			}
+		}
+		node.Children = arranged
+	})
+}
+
+// upd rewrites the kind of every node carrying x (the reference's upd).
+func upd(t *tree.Node, x, kind string) {
+	everyNode(t, x, func(node *tree.Node) { node.Kind = kind })
+}
+
+// sameMultiset reports whether two id lists hold the same ids with the same
+// multiplicities (the reference's same_multiset).
+func sameMultiset(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := map[string]int{}
+	for _, id := range a {
+		counts[id]++
+	}
+	for _, id := range b {
+		counts[id]--
+		if counts[id] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Apply applies op to t: the new tree, or the rejection. t is never changed.
@@ -333,45 +415,56 @@ func Apply(t tree.Node, op Op) (tree.Node, Rejection) {
 	return out, nil
 }
 
-// applyInPlace applies op to t in place. On a rejection the tree may be partly
-// changed (a batch member applied before the refused one); Apply is the
-// all-or-nothing form.
+// applyInPlace applies op to t in place, the reference's apply clause for clause. On
+// a rejection the tree may be partly changed (a batch member applied before the
+// refused one); Apply is the all-or-nothing form.
 func applyInPlace(t *tree.Node, op Op) Rejection {
 	switch o := op.(type) {
 	case InsertChild:
 		if d, dup := firstDuplicate(t, &o.Node); dup {
 			return DuplicateID{ID: d}
 		}
-		p := t.Find(o.Parent)
-		if p == nil {
+		if !hasID(t, o.Parent) {
 			return UnknownNode{Target: o.Parent}
 		}
-		p.Children = append(p.Children, o.Node.Clone())
+		ins(t, o.Parent, &o.Node)
 		return nil
 	case RemoveNode:
 		if o.Target == t.ID {
 			return CannotRemoveRoot{}
 		}
-		if detach(t, o.Target) == nil {
+		if !hasID(t, o.Target) {
 			return UnknownNode{Target: o.Target}
 		}
+		pid, ok := parentOf(t, o.Target)
+		if !ok {
+			return UnknownNode{Target: o.Target}
+		}
+		remAt(t, pid, o.Target)
 		return nil
 	case MoveNode:
 		if o.Target == t.ID {
 			return CannotRemoveRoot{}
 		}
-		moved := t.Find(o.Target)
-		if moved == nil {
+		if !hasID(t, o.Target) {
 			return UnknownNode{Target: o.Target}
 		}
-		if t.Find(o.NewParent) == nil {
+		if !hasID(t, o.NewParent) {
 			return UnknownNode{Target: o.NewParent}
 		}
-		if moved.Find(o.NewParent) != nil {
+		sub := t.Find(o.Target).Clone()
+		if hasID(&sub, o.NewParent) {
 			return WouldNestUnderSelf{Target: o.Target}
 		}
-		node := detach(t, o.Target)
-		t.Find(o.NewParent).Children = append(t.Find(o.NewParent).Children, *node)
+		pid, ok := parentOf(t, o.Target)
+		if !ok {
+			return UnknownNode{Target: o.Target}
+		}
+		remAt(t, pid, o.Target)
+		if !hasID(t, o.NewParent) {
+			return UnknownNode{Target: o.NewParent}
+		}
+		ins(t, o.NewParent, &sub)
 		return nil
 	case ReorderChildren:
 		p := t.Find(o.Parent)
@@ -382,23 +475,10 @@ func applyInPlace(t *tree.Node, op Op) Rejection {
 		for i := range p.Children {
 			current[i] = p.Children[i].ID
 		}
-		wanted := append([]string(nil), o.Order...)
-		sort.Strings(current)
-		sort.Strings(wanted)
-		if !equalStrings(current, wanted) {
+		if !sameMultiset(current, o.Order) {
 			return ReorderMismatch{Parent: o.Parent}
 		}
-		old := p.Children
-		p.Children = make([]tree.Node, 0, len(old))
-		for _, id := range o.Order {
-			for i := range old {
-				if old[i].ID == id {
-					p.Children = append(p.Children, old[i])
-					old = append(old[:i], old[i+1:]...)
-					break
-				}
-			}
-		}
+		reorderAt(t, o.Parent, o.Order)
 		return nil
 	case Batch:
 		for _, member := range o.Ops {
@@ -408,11 +488,10 @@ func applyInPlace(t *tree.Node, op Op) Rejection {
 		}
 		return nil
 	case UpdateNode:
-		target := t.Find(o.Node.ID)
-		if target == nil {
+		if !hasID(t, o.Node.ID) {
 			return UnknownNode{Target: o.Node.ID}
 		}
-		target.Kind = o.Node.Kind
+		upd(t, o.Node.ID, o.Node.Kind)
 		return nil
 	}
 	panic("ops.Apply: not an Op")

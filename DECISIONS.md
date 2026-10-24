@@ -69,6 +69,13 @@ the premise holds for part of it and not for the rest:
   the grammar, so `1e5-0` is `1e5` and trailing text, not one malformed token), and `expect`, which
   refuses `ExpectedToken` at the end of the input where a value was not what was expected. The
   reader now reads as the model reads, and the differential compares positions on ASCII input.
+  The bounded fuzz run then found a fourth, in the apply: on a tree that repeats an id — outside
+  the well-formedness the reference's apply assumes and never states — the reference's
+  `updateNode` rebuilds EVERY node carrying the id while a first-match walk rebuilds one, so the
+  spine's tree primitives are now the model's clause for clause (`ins`, `rem_at`, `reorder_at`,
+  `upd` over every node carrying the id; `tryFind` and `parentOf` the first in pre-order), and the
+  two agree on every tree the fuzzer builds, well-formed or not. The failing input is kept as a
+  regression seed under `conformance/testdata/fuzz/`.
 
 ## D4 — 2026-10-24 — what the first certification covers, and what it does not yet
 
