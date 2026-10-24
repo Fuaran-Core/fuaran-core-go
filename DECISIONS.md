@@ -74,8 +74,11 @@ the premise holds for part of it and not for the rest:
   `updateNode` rebuilds EVERY node carrying the id while a first-match walk rebuilds one, so the
   spine's tree primitives are now the model's clause for clause (`ins`, `rem_at`, `reorder_at`,
   `upd` over every node carrying the id; `tryFind` and `parentOf` the first in pre-order), and the
-  two agree on every tree the fuzzer builds, well-formed or not. The failing input is kept as a
-  regression seed under `conformance/testdata/fuzz/`.
+  two agree on every tree the fuzzer builds, well-formed or not. A fifth followed in the reader: a
+  `\u` escape with fewer than four UTF-16 units left is `TruncatedUnicodeEscape` to the reference,
+  which counts units, where a byte count saw four bytes in `\u0é0` and called it `BadHexDigit`; the
+  reader now counts units. Each failing input is kept as a regression seed under
+  `conformance/testdata/fuzz/`, and the bounded runs that found them are the gate's.
 
 ## D4 — 2026-10-24 — what the first certification covers, and what it does not yet
 

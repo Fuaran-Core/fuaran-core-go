@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -328,11 +329,20 @@ func hex4(u uint16) string {
 	return string([]byte{digits[u>>12], digits[(u>>8)&0xF], digits[(u>>4)&0xF], digits[u&0xF]})
 }
 
-// parseHex4 reads the four hex digits of a \u escape, p.pos just past the `\u`. A
-// truncated escape and a bad digit are both refused there, at the first digit's
-// position, as the reference refuses them.
+// parseHex4 reads the four hex digits of a \u escape, p.pos just past the `\u`. The
+// reference counts the units left in UTF-16: fewer than four is
+// TruncatedUnicodeEscape, and four or more with one that is not a hex digit is
+// BadHexDigit, both refused at the first digit's position. Counting bytes would
+// call `\u0é0` a bad digit where the reference, seeing three units, calls it
+// truncated.
 func (p *parser[V]) parseHex4() (uint16, Refusal) {
-	if p.pos+4 > len(p.src) {
+	units := 0
+	for i := p.pos; i < len(p.src) && units < 4; {
+		r, size := utf8.DecodeRuneInString(p.src[i:])
+		units += utf16.RuneLen(r)
+		i += size
+	}
+	if units < 4 {
 		return 0, p.fail(TruncatedUnicodeEscape, "truncated \\u escape")
 	}
 	var value uint16
